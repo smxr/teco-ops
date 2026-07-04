@@ -1,0 +1,104 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+#include <simd.h>
+#include <slave.h>
+
+#include "ual/com/rt.h"
+#include "ual/kernel/flash_attention/flash_attention.h"
+
+using namespace sdaa;  //NOLINT
+
+// macro definition of MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+// macro definition of MAX
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+__device__ __always_inline void make_inf(int len) {
+    // short neg_inf_bit = 0xFC00;
+    // half neg_inf;
+    // memcpy(&neg_inf, &neg_inf_bit, sizeof(half));
+    // halfv16 v_inf = neg_inf;
+    // int Idx = 0;
+    // half *inf_buf = ldm_inf_.data().get();
+    // for (; Idx <= len - 16; Idx += 16) {
+    //     simd_store(v_inf, inf_buf + Idx);
+    // }
+    // for (; Idx < len; Idx++) {
+    //     inf_buf[Idx] = neg_inf;
+    // }
+}
+
+// tecoKernel ????? 
+__global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
+    int spe_num = args.spe_num;
+    int tid = threadIdx;
+    if (tid >= spe_num) {
+        return;
+    }
+    int BM = 128;   // M block, 128 for ace
+    int BN = 32;    // N block, 32 for ace; block_size
+    int BK = 128;   // head_dim
+    int token_size = args.size_per_head * sizeof(half);
+    int * ldm_block_table = (int*)rt_spm_malloc(args.block_table_dim * sizeof(int));
+    half * qbuf = (half*)rt_spm_malloc(BM * token_size);            // BM * BK
+    half * kbuf = (half*)rt_spm_malloc(BN * token_size);            // BK * BN
+    float * outc = (float*)rt_spm_malloc(BM * BN * sizeof(float));     // BM * BN
+    int cur_q_seq_len = 0;
+    for (int b = 0; b < args.batch_size; b++) {
+        int q_seq_len = args.q_seq_lens[b], k_seq_len = args.kv_seq_lens[b];
+        memcpy(ldm_block_table, args.block_table + b * args.block_table_dim, args.block_table_dim * sizeof(int));
+        for (int i = 0; i < q_seq_len; i += BM) {
+            for (int j = 0; j < k_seq_len; j += BN) {
+                // load q
+                int cur_BM = MIN(BM, q_seq_len % BM);
+                int cur_BN = MIN(BN, k_seq_len % BN);
+                half * src_q_ptr = (half *)args.q + (cur_q_seq_len + i) * (args.local_head_num * args.size_per_head) + tid * args.size_per_head;
+                size_t q_src_stride = (args.local_head_num - 1) * token_size;
+                memcpy_stride(qbuf, src_q_ptr, cur_BM * token_size, token_size, {0, q_src_stride});
+
+                // load k
+                int kv_group = tid / args.local_kv_head_num;           // GQA
+                int cur_block = j / args.block_size;
+                int block_id = ldm_block_table[cur_block];
+                half * src_k_ptr = (half *)args.key_cache + block_id * args.local_kv_head_num * args.block_size * args.size_per_head
+                                    + kv_group * args.block_size * args.size_per_head;
+                memcpy(kbuf, src_k_ptr, cur_BN * token_size);
+
+                // gemm
+                // 只用ace的部分
+                // gemm(qbuf, kbuf, outc, BM, BN, BK); // float
+                
+
+                // mask inplace // flaot
+                // float online_softmax
+
+            }
+        }
+        cur_q_seq_len += q_seq_len;
+    }
+    
+}

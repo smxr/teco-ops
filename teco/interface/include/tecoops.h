@@ -133,6 +133,21 @@ tecoopsStatus_t tecoopsReduceVariance(const tecoopsHandle_t handle, int axis, in
 tecoopsStatus_t tecoopsMorton3DInvert(tecoopsHandle_t handle, const int* indices, uint32_t N,
                                       int *coords);
 
+tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
+                                      int max_prefill_len, int max_decode_len,
+                                      int max_block_num, const int *q_seq_lens,
+                                      const int *kv_seq_lens, 
+                                      const tecoopsTensorDescriptor_t blockTableDesc,
+                                      const void *blockTable,
+                                      const tecoopsTensorDescriptor_t qDataDesc,
+                                      const void *qData,
+                                      const tecoopsTensorDescriptor_t kCacheDesc,
+                                      const void *kCache,
+                                      const tecoopsTensorDescriptor_t vCacheDesc,
+                                      const void *vCache,
+                                      const tecoopsTensorDescriptor_t oDataDesc,
+                                      void *oData, void *workspace);
+
 #ifdef __cplusplus
 }
 #endif

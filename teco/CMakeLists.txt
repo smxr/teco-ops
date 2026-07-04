@@ -88,6 +88,7 @@ set_target_properties(ops_objs PROPERTIES LINKER_LANGUAGE CXX)
 target_compile_options(ops_objs PRIVATE ${complie_options})
 target_include_directories(ops_objs PRIVATE "${OPS_DIR}/../common")
 target_include_directories(ops_objs PRIVATE "${OPS_DIR}/")
+target_include_directories(ops_objs PRIVATE "${OPS_DIR}/../thirdparty/teco-hal/include")
 
 if(WITH_TORCH)
     set(TORCH_LINK_FLAGS "-L${TORCH_LIB_DIR} -ltorch -ltorch_cpu -lc10")
@@ -120,6 +121,7 @@ else()
     add_custom_target(ops_lib ALL
             COMMAND mkdir -p ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
             COMMAND tecocc $<TARGET_OBJECTS:ops_objs> -flto -ffp-contract=fast -fPIC -shared --sdaa-link -fuse-ld=lld
+            -Wno-unused-command-line-argument --sdaa-device-lib=${OPS_DIR}/../thirdparty/teco-hal/lib/teco_hal.bc
             ${TORCH_LINK_FLAGS}
             -o ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libteco_ops.so
             COMMAND_EXPAND_LISTS
