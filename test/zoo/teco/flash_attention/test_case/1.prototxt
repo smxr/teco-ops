@@ -2,22 +2,27 @@ op_name: "flash_attention"
 input {
   id: "blockTable"
   shape {
-    dims: 1
-    dims: 1
+    dims: 2
+    dims: 3
   }
   layout: LAYOUT_ARRAY
   dtype: DTYPE_INT32
   ttype: TENSOR
   prev_value {
     value_i: 0
+    value_i: 1
+    value_i: 2
+    value_i: 3
+    value_i: 4
+    value_i: 0
   }
 }
 input {
   id: "qData"
   shape {
-    dims: 4
-    dims: 4
-    dims: 4
+    dims: 160
+    dims: 32
+    dims: 128
   }
   layout: LAYOUT_ARRAY
   dtype: DTYPE_HALF
@@ -32,10 +37,10 @@ input {
 input {
   id: "kCache"
   shape {
-    dims: 1
-    dims: 1
-    dims: 4
-    dims: 4
+    dims: 5
+    dims: 8
+    dims: 32
+    dims: 128
   }
   layout: LAYOUT_ARRAY
   dtype: DTYPE_HALF
@@ -50,10 +55,10 @@ input {
 input {
   id: "vCache"
   shape {
-    dims: 1
-    dims: 1
-    dims: 4
-    dims: 4
+    dims: 5
+    dims: 8
+    dims: 32
+    dims: 128
   }
   layout: LAYOUT_ARRAY
   dtype: DTYPE_HALF
@@ -65,12 +70,38 @@ input {
     distribution: UNIFORM
   }
 }
+input {
+  id: "q_seq_lens"
+  shape {
+    dims: 2
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT32
+  ttype: TENSOR
+  prev_value {
+    value_i: 96
+    value_i: 64
+  }
+}
+input {
+  id: "kv_seq_lens"
+  shape {
+    dims: 2
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT32
+  ttype: TENSOR
+  prev_value {
+    value_i: 96
+    value_i: 64
+  }
+}
 output {
   id: "oData"
   shape {
-    dims: 4
-    dims: 4
-    dims: 4
+    dims: 160
+    dims: 32
+    dims: 128
   }
   layout: LAYOUT_ARRAY
   dtype: DTYPE_HALF
@@ -79,9 +110,11 @@ output {
 }
 tecokernel_param {
   flash_attention_param {
-    max_prefill_len: 4
-    max_decode_len: 4
-    q_seq_lens: 4
-    kv_seq_lens: 4
+    max_prefill_len: 96
+    max_decode_len: 96
   }
+}
+test_param: {
+    error_func: DIFF3_MAX
+    error_threshold: 0.008
 }

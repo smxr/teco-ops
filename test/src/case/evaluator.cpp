@@ -150,40 +150,40 @@ bool Evaluator::resetNanOrInfToZero(void *teco_result, void *baseline_result, si
                                     const testpt::DataType dtype, Error *error_teco) {
     switch (dtype) {
         case testpt::DTYPE_HALF:
-            return resetNanOrInfAsZero((half_float::half *)teco_result,
-                                       (half_float::half *)baseline_result, count, error_teco);
+            return resetNanOrInfAsZero((half_float::half *)baseline_result,
+                                       (half_float::half *)teco_result, count, error_teco);
         case testpt::DTYPE_FLOAT:
-            return resetNanOrInfAsZero((float *)teco_result, (float *)baseline_result, count,
+            return resetNanOrInfAsZero((float *)baseline_result, (float *)teco_result, count,
                                        error_teco);
         case testpt::DTYPE_INT8:
-            return resetNanOrInfAsZero((int8_t *)teco_result, (int8_t *)baseline_result, count,
+            return resetNanOrInfAsZero((int8_t *)baseline_result, (int8_t *)teco_result, count,
                                        error_teco);
         case testpt::DTYPE_INT16:
-            return resetNanOrInfAsZero((int16_t *)teco_result, (int16_t *)baseline_result, count,
+            return resetNanOrInfAsZero((int16_t *)baseline_result, (int16_t *)teco_result, count,
                                        error_teco);
         case testpt::DTYPE_INT32:
-            return resetNanOrInfAsZero((int32_t *)teco_result, (int32_t *)baseline_result, count,
+            return resetNanOrInfAsZero((int32_t *)baseline_result, (int32_t *)teco_result, count,
                                        error_teco);
         case testpt::DTYPE_INT64:
-            return resetNanOrInfAsZero((int64_t *)teco_result, (int64_t *)baseline_result, count,
+            return resetNanOrInfAsZero((int64_t *)baseline_result, (int64_t *)teco_result, count,
                                        error_teco);
         case testpt::DTYPE_UINT8:
-            return resetNanOrInfAsZero((uint8_t *)teco_result, (uint8_t *)baseline_result, count,
+            return resetNanOrInfAsZero((uint8_t *)baseline_result, (uint8_t *)teco_result, count,
                                        error_teco);
         case testpt::DTYPE_UINT16:
-            return resetNanOrInfAsZero((uint16_t *)teco_result, (uint16_t *)baseline_result, count,
+            return resetNanOrInfAsZero((uint16_t *)baseline_result, (uint16_t *)teco_result, count,
                                        error_teco);
         case testpt::DTYPE_UINT32:
-            return resetNanOrInfAsZero((uint32_t *)teco_result, (uint32_t *)baseline_result, count,
+            return resetNanOrInfAsZero((uint32_t *)baseline_result, (uint32_t *)teco_result, count,
                                        error_teco);
         case testpt::DTYPE_UINT64:
-            return resetNanOrInfAsZero((uint64_t *)teco_result, (uint64_t *)baseline_result, count,
+            return resetNanOrInfAsZero((uint64_t *)baseline_result, (uint64_t *)teco_result, count,
                                        error_teco);
         case testpt::DTYPE_DOUBLE:
-            return resetNanOrInfAsZero((double *)teco_result, (double *)baseline_result, count,
+            return resetNanOrInfAsZero((double *)baseline_result, (double *)teco_result, count,
                                        error_teco);
         case testpt::DTYPE_BOOL:
-            return resetNanOrInfAsZero((bool *)teco_result, (bool *)baseline_result, count,
+            return resetNanOrInfAsZero((bool *)baseline_result, (bool *)teco_result, count,
                                        error_teco);
         case testpt::DTYPE_BFLOAT16:
             return resetNanOrInfAsZero((uint16_t *)teco_result, (uint16_t *)baseline_result, count,

@@ -46,6 +46,7 @@ typedef struct FlashAttentionArgs {
     int max_q_seq_len;
     int max_k_seq_len;
     int max_block_num;
+    float softmax_scale;
     const int *q_seq_lens;
     const int *kv_seq_lens;
     const int *seq_lens_pre_cache;

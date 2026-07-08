@@ -46,10 +46,8 @@ class FlashAttentionExecutor : public TecoExecutor {
     void paramGeneration();
     void compute();
     void cpuCompute();
-    void gpuCompute();
     int64_t getTheoryOps() override;
     int64_t getTheoryIoSize() override;
-    void destroy();
 
  private:
     int max_prefill_len_;
@@ -75,7 +73,7 @@ class FlashAttentionExecutor : public TecoExecutor {
     const void *vCache_;
     void *oData_;
 
-    // q/kv seq_lens: host arrays for API call
+    // seq_lens values read from prototxt (for validation)
     std::vector<int> q_seq_lens_;
     std::vector<int> kv_seq_lens_;
 };

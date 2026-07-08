@@ -29,76 +29,415 @@
 
 #include "ual/com/rt.h"
 #include "ual/kernel/flash_attention/flash_attention.h"
+#include "teco_hal.h"
 
 using namespace sdaa;  //NOLINT
+using namespace teco::hal;  //NOLINT
 
 // macro definition of MIN
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 // macro definition of MAX
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
+// FLT_MAX if not already defined
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38F
+#endif
 
-__device__ __always_inline void make_inf(int len) {
-    // short neg_inf_bit = 0xFC00;
-    // half neg_inf;
-    // memcpy(&neg_inf, &neg_inf_bit, sizeof(half));
-    // halfv16 v_inf = neg_inf;
-    // int Idx = 0;
-    // half *inf_buf = ldm_inf_.data().get();
-    // for (; Idx <= len - 16; Idx += 16) {
-    //     simd_store(v_inf, inf_buf + Idx);
-    // }
-    // for (; Idx < len; Idx++) {
-    //     inf_buf[Idx] = neg_inf;
-    // }
+// load a tile from KV cache (key or value) into dst
+//   src = cache[block_id][kv_head_idx ][0..num_tokens-1][0..head_size-1]   (original layout)
+//   dst = [num_tokens, head_size]                                       (row-major contiguous)
+__device__ __always_inline void load_kv_cache(
+    half *dst, const half *cache, const int *block_table, int logical_block,
+    int kv_head_idx , int kv_head_num, int block_size, int head_size, int num_tokens) {
+    int block_id = block_table[logical_block];
+    const half *src = cache
+        + block_id * kv_head_num * block_size * head_size
+        + kv_head_idx  * block_size * head_size;
+    memcpy(dst, src, num_tokens * head_size * sizeof(half));
 }
 
-// tecoKernel ????? 
+// fill len floats with -inf
+__device__ __always_inline void fill_inf(float *buf, int len) {
+    int neg_inf_bit = 0xFF800000;
+    float neg_inf;
+    memcpy(&neg_inf, &neg_inf_bit, sizeof(float));
+    floatv16 v_inf = neg_inf;
+    int Idx = 0;
+    for (; Idx < len % 16; Idx++) {
+        buf[Idx] = neg_inf;
+    }
+    for (; Idx <= len - 16; Idx += 16) {
+        simd_store(v_inf, buf + Idx);
+    }
+}
+
+// causal mask on score tile [cur_BM, cur_BN] inside [BM, BN]
+//   score[qi * BN + kj] = -inf when  K position > Q position in full sequence
+//   Q's first position in K seq = k_seq_len - q_seq_len
+//   prefill: (128==128)       → q_start=0
+//   decode: (1<1024)          → q_start=1023
+//   chunked_prefill: (200<1000) → q_start=800
+__device__ __always_inline void apply_causal_mask(
+    float *score, int cur_BM, int cur_BN,
+    int qi_off, int kj_off, int q_seq_len, int k_seq_len,
+    int BM, int BN) {
+
+    int q_start = k_seq_len - q_seq_len;   // Q的起始位置映射到K序列
+    if (q_start < 0) q_start = 0;
+
+    for (int qi = 0; qi < cur_BM; qi++) {
+        int rel_q_pos = q_start + qi_off + qi;                 // 当前Q位置在K序列中的位置
+        int allowed = rel_q_pos - kj_off + 1;                  // 前allowed个K位置可用
+        if (allowed < 0) allowed = 0;
+        if (allowed >= cur_BN) continue;                   // 整行都不需要mask
+        fill_inf(score + qi * BN + allowed, cur_BN - allowed);
+    }
+}
+
+__device__ float compute_max(float *input, int size) {
+    floatv16 vf = -FLT_MAX;      // 向量寄存器初始化为 -inf
+    floatv16 vres = -FLT_MAX;    // 结果向量寄存器
+    float result = -FLT_MAX;     // 标量最终结果
+    int i = 0;
+    
+    // === SIMD 循环：每次处理 16 个元素 ===
+    for (i = 0; i < size; i += 16) {
+        simd_load(vf, input + i);       // 加载 16 个 float
+        vres = simd_max(vf, vres);      // 逐元素取最大值
+    }
+    
+    // === 处理剩余的不足 16 个的元素 ===
+    for (; i < size % 16; i++) {
+        result = MAX(result, input[i]);
+    }
+    
+    // === 将向量寄存器的结果合并到标量 ===
+    float *tmp = (float *)&vres;
+    for (int j = 0; j < 16; j++) {
+        result = MAX(result, tmp[j]);
+    }
+    return result;
+}
+
+__device__ float compute_exp_sum(float *input, float max, int size) {
+    floatv16 vf = 0.0f;
+    floatv16 vres = 0.0f;          // 修正：floatv16
+    floatv16 vmax = max;
+    float result = 0.0f;
+    int i = 0;
+    int remainder = size % 16;
+    
+    for (i = 0; i < size; i += 16) {
+        simd_load(vf, input + i);
+        vf = simd_exp(vf - vmax);
+        vres = simd_add(vres, vf);   // 或 vres += vf
+    }
+    
+    // 处理剩余元素
+    for (; i < remainder; i++) {
+        result += expf(input[i] - max);
+    }
+    
+    // 合并向量结果（直接累加，不需要再 exp）
+    float *tmp = (float *)&vres;
+    for (int j = 0; j < 16; j++) {
+        result += tmp[j];  // ✅ 已经是 exp 后的值
+    }
+    return result;
+}
+
+__device__ void online_softmax_step(
+    float *scores,           // S: [BM, BN] 输入scores，输出exp(S - m_new) (原地替换)
+    const float *pre_max,    // m_old: [m]
+    const float *pre_sum,    // l_old: [m]
+    float *cur_max,          // m_new: [m] (输出)
+    float *cur_sum,          // l_new: [m] (输出)
+    float *scale,            // scale = exp(m_old - m_new): [m] (输出, 给后续rescale o_accum用)
+    int m, int n,            // cur_BM, cur_BN
+    int ld_scores) {         // BN (scores 行 stride)
+
+    // Step 1: per-row 算 m_new 和 scale
+    for (int i = 0; i < m; i++) {
+        float *src_row = scores + i * ld_scores;
+        float m_block = compute_max(src_row, n);
+        float m_new = MAX(pre_max[i], m_block);
+        m_new = MAX(m_new, 0.0f);
+        cur_max[i] = m_new;
+        scale[i] = expf(pre_max[i] - m_new);
+    }
+
+    // Step 2: 原地替换 scores: S -> exp(S - m_new), 同时算 l_new
+    for (int i = 0; i < m; i++) {
+        float *src_row = scores + i * ld_scores;
+        float m_new = cur_max[i];
+        float l_old = pre_sum[i];
+        float s = scale[i];
+
+        float l_block = 0.0f;
+        int j = 0;
+        for (; j + 16 <= n; j += 16) {
+            floatv16 v;
+            simd_load(v, src_row + j);
+            v = simd_exp(v - m_new);
+            simd_store(v, src_row + j);          // 原地写回 exp(S - m_new)
+            float *vf = (float *)&v;
+            for (int t = 0; t < 16; t++) l_block += vf[t];
+        }
+        for (; j < n; j++) {                     // 剩余不足16的尾数
+            src_row[j] = expf(src_row[j] - m_new);
+            l_block += src_row[j];
+        }
+        cur_sum[i] = l_old * s + l_block;
+    }
+}
+
+// reformat V from [BN, BK] row-major to DataBkn32Block [BK/32, BN, 32]
+//   gemm score * V needs B in [n/32, k, 32] = [BK/32, BN, 32] layout
+__device__ __always_inline void reformat_v(half *v_dst, const half *v_rowmajor,
+                                           int BN, int BK) {
+    for (int hb = 0; hb < BK / 32; hb++) {
+        for (int t = 0; t < BN; t++) {
+            for (int h = 0; h < 32; h += 16) {
+                halfv16 vec;
+                simd_load(vec, v_rowmajor + t * BK + hb * 32 + h);
+                simd_store(vec, v_dst + hb * BN * 32 + t * 32 + h);
+            }
+        }
+    }
+}
+
+// print first 10 half values for debug
+__device__ void dbg_print_half(const char *tag, const half *buf, int n) {
+    printf("%s (%d): ", tag, n);
+    int cnt = n > 10 ? 10 : n;
+    for (int i = 0; i < cnt; i++) printf("%f ", (float)buf[i]);
+    printf("\n");
+}
+__device__ void dbg_print_float(const char *tag, const float *buf, int n) {
+    printf("%s (%d): ", tag, n);
+    int cnt = n > 10 ? 10 : n;
+    for (int i = 0; i < cnt; i++) printf("%f ", buf[i]);
+    printf("\n");
+}
+
 __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
     int spe_num = args.spe_num;
     int tid = threadIdx;
     if (tid >= spe_num) {
         return;
     }
+    int num_kv_groups = args.local_head_num / args.local_kv_head_num;
+
     int BM = 128;   // M block, 128 for ace
     int BN = 32;    // N block, 32 for ace; block_size
     int BK = 128;   // head_dim
     int token_size = args.size_per_head * sizeof(half);
     int * ldm_block_table = (int*)rt_spm_malloc(args.block_table_dim * sizeof(int));
     half * qbuf = (half*)rt_spm_malloc(BM * token_size);            // BM * BK
+    half * ktmp = (half*)rt_spm_malloc(BN * token_size);            // BN * BK
     half * kbuf = (half*)rt_spm_malloc(BN * token_size);            // BK * BN
-    float * outc = (float*)rt_spm_malloc(BM * BN * sizeof(float));     // BM * BN
-    int cur_q_seq_len = 0;
+    float * outc = (float*)rt_spm_malloc(BM * BN * sizeof(float));  // BM * BN
+    half * obuf = (half*)rt_spm_malloc(BM * token_size);            // BM * BK, 最终输出（half）
+    float *o_accum = (float*)rt_spm_malloc(BM * BK * sizeof(float)); // BM * BK, float 累加器
+    float *l_prev = (float*)rt_spm_malloc(BM * sizeof(float));       // 累积 l  (old)
+    float *m_prev = (float*)rt_spm_malloc(BM * sizeof(float));       // 累积 m  (old)
+    float *l_cur  = (float*)rt_spm_malloc(BM * sizeof(float));       // 累积 l  (new)
+    float *m_cur  = (float*)rt_spm_malloc(BM * sizeof(float));       // 累积 m  (new)
+    float *scale  = (float*)rt_spm_malloc(BM * sizeof(float));       // exp(m_old - m_new), per row, rescale o_accum用
+    int cur_q_index = 0;
     for (int b = 0; b < args.batch_size; b++) {
+        if (tid == 4) printf("into batch = %d, head = %d \n", b, tid);
         int q_seq_len = args.q_seq_lens[b], k_seq_len = args.kv_seq_lens[b];
+        if (tid == 4) printf("q_seq_len = %d, k_seq_len = %d \n", q_seq_len, k_seq_len);
         memcpy(ldm_block_table, args.block_table + b * args.block_table_dim, args.block_table_dim * sizeof(int));
+        if (tid == 4) printf("dma block_table right\n");
         for (int i = 0; i < q_seq_len; i += BM) {
+            int cur_BM_q = MIN(BM, q_seq_len - i);
+            // init online softmax state for this Q block
+            for (int idx = 0; idx < BM * BK; idx++) {
+                o_accum[idx] = 0.0f;
+            }
+            for (int row = 0; row < BM; row++) {
+                l_prev[row] = 0.0f;
+            }
+            fill_inf(m_prev, BM);
+            float *l_ptr = l_prev, *l_next = l_cur;
+            float *m_ptr = m_prev, *m_next = m_cur;
+
+            // load q [cur_BM, size_per_head]
+            int cur_BM = MIN(BM, q_seq_len - i);
+            half * src_q_ptr = (half *)args.q + (cur_q_index + i) * (args.local_head_num * args.size_per_head) + tid * args.size_per_head;
+            size_t q_src_stride = (args.local_head_num - 1) * token_size;
+            memcpy_stride(qbuf, src_q_ptr, cur_BM * token_size, token_size, {0, q_src_stride});
+            if (tid == 4) dbg_print_half("qbuf", qbuf, cur_BM * args.size_per_head);
+    
             for (int j = 0; j < k_seq_len; j += BN) {
-                // load q
-                int cur_BM = MIN(BM, q_seq_len % BM);
-                int cur_BN = MIN(BN, k_seq_len % BN);
-                half * src_q_ptr = (half *)args.q + (cur_q_seq_len + i) * (args.local_head_num * args.size_per_head) + tid * args.size_per_head;
-                size_t q_src_stride = (args.local_head_num - 1) * token_size;
-                memcpy_stride(qbuf, src_q_ptr, cur_BM * token_size, token_size, {0, q_src_stride});
+                if (tid == 4) printf("=========== i = %d, j = %d \n", i, j);
+                int cur_BN = MIN(BN, k_seq_len - j);
 
-                // load k
-                int kv_group = tid / args.local_kv_head_num;           // GQA
-                int cur_block = j / args.block_size;
+                // load k [cur_BN, size_per_head] -> ktmp
+                int kv_head_idx = tid / num_kv_groups;                    // GQA: num_heads/num_kv_heads=4
+                int cur_block = j / args.block_size;                    // BN == block_size
+                load_kv_cache(ktmp, (const half *)args.key_cache, ldm_block_table, cur_block,
+                              kv_head_idx , args.local_kv_head_num, args.block_size, args.size_per_head, cur_BN);
+                if (tid == 4) dbg_print_half("ktmp(K)", ktmp, cur_BN * args.size_per_head);
+
+                // transpose ktmp[cur_BN, head_size] -> kbuf[head_size, cur_BN]
+                //   kbuf[h*BN + t] = ktmp[t*head_size + h]
+                //   注意: 不能用 vec.store(kbuf + h*BN + t*16) 因为 t*16 当 t>=2 时超出 row 宽度 (BN=32)
+                for (int t = 0; t < cur_BN; t++) {
+                    for (int h = 0; h < args.size_per_head; h++) {
+                        kbuf[h * BN + t] = ktmp[t * args.size_per_head + h];
+                    }
+                }
+                // if (tid == 4) dbg_print_half("kbuf(K^T)", kbuf, args.size_per_head * BN);
+
+                // gemm: Q * K^T = score, using teco_hal matmul M2=128, N2=32
+                // 矩阵乘的结果是float
+                {
+                    MatmulConfig matmul_cfg;
+                    Matmul matmul(matmul_cfg);
+                    auto tensorQ = make_tensor<2>((half *)qbuf,
+                        {static_cast<size_t>(BM), static_cast<size_t>(args.size_per_head)});
+                    auto tensorK = make_tensor<2>((half *)kbuf,
+                        {static_cast<size_t>(args.size_per_head), static_cast<size_t>(BN)});
+                    auto tensorC = make_tensor<2>((float *)outc,
+                        {static_cast<size_t>(BM), static_cast<size_t>(BN)});
+
+                    matmul.compute_async<128, 32, MatmulDataLayout::DataBkn32Block>(
+                        tensorQ, tensorK, /*is_lastk=*/true);
+                    matmul.storeC_spm_async(tensorC);
+                    matmul.wait_storeC(1);
+                }
+                // if (tid == 4) dbg_print_float("outc(gemm_qk)", outc, BM * BN);
+
+                // simd mul softmax_scale
+                {
+                    floatv16 vscale = args.softmax_scale;
+                    int total = BM * BN;
+                    int si = 0;
+                    for (; si + 16 <= total; si += 16) {
+                        floatv16 v;
+                        simd_load(v, outc + si);
+                        v = simd_mul(v, vscale);
+                        simd_store(v, outc + si);
+                    }
+                    for (; si < total; si++) {
+                        outc[si] *= args.softmax_scale;
+                    }
+                }
+                if (tid == 4) dbg_print_float("outc(gemm_qk) * softmax_scale", outc, BM * BN);
+
+                // causal mask inplace
+                apply_causal_mask(outc, cur_BM, cur_BN, i, j, q_seq_len, k_seq_len, BM, BN);
+                if (tid == 4) dbg_print_float("outc(mask)", outc, BM * BN);
+
+                // Step A: online softmax 统计 + 原地 S -> exp(S - m_new)
+                online_softmax_step(outc,
+                                    m_ptr, l_ptr,
+                                    m_next, l_next,
+                                    scale,
+                                    cur_BM, cur_BN, BN);
+
+                // Step B: 重缩放 o_accum: O *= exp(m_old - m_new)
+                for (int ri = 0; ri < cur_BM; ri++) {
+                    float s = scale[ri];
+                    for (int rk = 0; rk < BK; rk++) {
+                        o_accum[ri * BK + rk] *= s;
+                    }
+                }
+
+                // Step C: float->half: outc -> p_score (ktmp重用作p_score缓冲), simd向量化
+                half *p_score = ktmp;
+                {
+                    int total = cur_BM * cur_BN;
+                    int si = 0;
+                    for (; si + 16 <= total; si += 16) {
+                        floatv16 vf;
+                        halfv16 vh;
+                        simd_load(vf, outc + si);
+                        vh = (halfv16)vf;
+                        simd_store(vh, p_score + si);
+                    }
+                    for (; si < total; si++) {
+                        p_score[si] = (half)outc[si];
+                    }
+                }
+                if (tid == 4) dbg_print_half("p_score", p_score, cur_BM * cur_BN);
+
+                // Step D: 加载 V + gemm p_score @ V
+                // KV cache 形状: [max_block_num, kv_head_num, block_size, head_size]
+                //   每个 block: [kv_head_num, block_size, head_size]
+                //   每个 kv_head_idx : [block_size, head_size] 行主序, 行距=head_size
                 int block_id = ldm_block_table[cur_block];
-                half * src_k_ptr = (half *)args.key_cache + block_id * args.local_kv_head_num * args.block_size * args.size_per_head
-                                    + kv_group * args.block_size * args.size_per_head;
-                memcpy(kbuf, src_k_ptr, cur_BN * token_size);
+                const half *v_cache_base = (const half *)args.value_cache
+                    + block_id * args.local_kv_head_num * args.block_size * args.size_per_head
+                    + kv_head_idx  * args.block_size * args.size_per_head;
+                // v_cache_base = V[block_id, kv_head_idx , 0, 0] 形状: [block_size, head_size] 行主序
 
-                // gemm
-                // 只用ace的部分
-                // gemm(qbuf, kbuf, outc, BM, BN, BK); // float
-                
+                half * vbuf = kbuf;
+                float * outO = outc;            // reuse outc
+                int gemm_bn = 32;
+                for (int hb = 0; hb < BK / gemm_bn; hb++) {
+                    // 直接从 cache 读 V[:, hb*32 : hb*32+31] -> vbuf [cur_BN, gemm_bn] packed
+                    //   源: V[i][hb*32..hb*32+31] = cache[(i)*head_size + hb*32 .. +31]
+                    //   行距 = head_size个half
+                    //   目的: vbuf packed, 行距 = gemm_bn个half
+                    memcpy_stride(vbuf, v_cache_base + hb * gemm_bn,
+                                  cur_BN * gemm_bn * sizeof(half), gemm_bn * sizeof(half),
+                                  {0, (args.size_per_head - gemm_bn) * sizeof(half)});
 
-                // mask inplace // flaot
-                // float online_softmax
+
+                    MatmulConfig cfg;
+                    Matmul matmul(cfg);
+                    auto tP = make_tensor<2>(p_score, {(size_t)BM, (size_t)BN});
+                    auto tV = make_tensor<2>(vbuf, {(size_t)BN, (size_t)gemm_bn});
+                    auto tO = make_tensor<2>((float *)outO, {(size_t)BM, (size_t)gemm_bn});
+                    matmul.compute_async<128, 32, MatmulDataLayout::DataBkn32Block>(tP, tV, true);
+                    matmul.storeC_spm_async(tO);
+                    matmul.wait_storeC(1);
+
+                    if (tid == 4 && hb == 0) dbg_print_float("outO", outO, 32);
+
+                    // Step E: 累加: o_accum[i][hb*32 + k] += outO[i][k]
+                    for (int ai = 0; ai < cur_BM; ai++) {
+                        for (int ak = 0; ak < gemm_bn; ak++) {
+                            o_accum[ai * BK + hb * gemm_bn + ak] += outO[ai * gemm_bn + ak];
+                        }
+                    }
+                }
+                if (tid == 4) dbg_print_float("o_accum", o_accum, cur_BM * gemm_bn);
+
+                // swap pointer: 让 l_ptr/m_ptr 指向新的累积值
+                float *tmp = l_ptr; l_ptr = l_next; l_next = tmp;
+                tmp = m_ptr; m_ptr = m_next; m_next = tmp;
 
             }
+            // normalize O_accum by l and convert to half (simd向量化)
+            for (int row = 0; row < cur_BM_q; row++) {
+                float l_inv = l_ptr[row] > 0.0f ? 1.0f / l_ptr[row] : 0.0f;
+                floatv16 vl_inv = l_inv;
+                float *o_row = o_accum + row * args.size_per_head;
+                half *obuf_row = obuf + row * args.size_per_head;
+                int k = 0;
+                for (; k + 16 <= args.size_per_head; k += 16) {
+                    floatv16 vf;
+                    halfv16 vh;
+                    simd_load(vf, o_row + k);
+                    vf = vf * vl_inv;
+                    vh = (halfv16)vf;
+                    simd_store(vh, obuf_row + k);
+                }
+                for (; k < args.size_per_head; k++) {
+                    obuf_row[k] = (half)(o_row[k] * l_inv);
+                }
+            }
+            // dma O (每个 head 写到自己对应的位置)
+            int rel_obuf_size = MIN(BM, q_seq_len) * token_size;
+            size_t o_dst_stride = (args.local_head_num - 1) * token_size;
+            half *out_base = (half *)args.fmha_out + (cur_q_index + i) * args.local_head_num * args.size_per_head + tid * args.size_per_head;
+            memcpy_stride(out_base, obuf, rel_obuf_size, token_size, {o_dst_stride, 0});
         }
-        cur_q_seq_len += q_seq_len;
+        cur_q_index += q_seq_len;
     }
-    
 }

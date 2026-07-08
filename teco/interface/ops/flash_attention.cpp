@@ -90,6 +90,7 @@ tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
 
     FlashAttentionArgs args;
     args.spe_num = handle->spe_num;
+    printf("spe_num %d \n", args.spe_num);
     args.batch_size = blockTableDesc->dimA[0];
     args.size_per_head = qDataDesc->dimA[2];
     args.local_head_num = qDataDesc->dimA[1];
@@ -99,6 +100,7 @@ tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
     // args.max_q_seq_len = max_decode_len;            // useless
     // args.max_k_seq_len = 
     args.max_block_num = kCacheDesc->dimA[0];
+    args.softmax_scale = 1.0 / sqrtf(double(args.size_per_head));
     args.q_seq_lens = q_seq_lens;
     args.kv_seq_lens = kv_seq_lens;
     // args.*seq_lens_pre_cache;
