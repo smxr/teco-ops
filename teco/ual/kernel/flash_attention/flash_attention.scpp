@@ -404,7 +404,7 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
             }
 
             // dma O
-            int rel_obuf_size = MIN(BM, q_seq_len) * token_size;
+            int rel_obuf_size = MIN(BM, q_seq_len - i) * token_size;
             size_t o_dst_stride = (args.local_head_num - 1) * token_size;
             half *out_base = (half *)args.fmha_out +
                              (cur_q_index + i) * args.local_head_num * args.size_per_head +
