@@ -365,6 +365,131 @@ def test_multi_batch():
 
     return all_ok
 
+
+# ========================================================================
+# 基于 fa_pt/ 真实数据的测试
+# ========================================================================
+
+
+# def test_from_real_data():
+#     """使用 fa_pt/ 目录下的真实数据进行精度对拍"""
+#     print("-" * 60)
+#     print("fa_pt 真实数据测试")
+
+#     # 检查数据文件是否存在
+#     files_needed = [
+#         "kv_cache.pt", "query.pt", "q_seq_lens.pt",
+#         "kv_seq_lens.pt", "tecoops_block_table.pt",
+#     ]
+#     for f in files_needed:
+#         if not os.path.exists(os.path.join(DATA_DIR, f)):
+#             print(f"  跳过: 缺少 {f}")
+#             return True
+
+#     # 加载 kv_cache
+#     kv_cache = torch.load(os.path.join(DATA_DIR, "kv_cache.pt"))
+#     if isinstance(kv_cache, (tuple, list)):
+#         key_cache, value_cache = kv_cache[0], kv_cache[1]
+#     else:
+#         key_cache, value_cache = kv_cache.unbind(0)
+
+#     # 加载其他数据
+#     q = torch.load(os.path.join(DATA_DIR, "query.pt"))
+#     q_seq_len_t = torch.load(os.path.join(DATA_DIR, "q_seq_lens.pt"))
+#     kv_seq_len_t = torch.load(os.path.join(DATA_DIR, "kv_seq_lens.pt"))
+#     block_table = torch.load(os.path.join(DATA_DIR, "tecoops_block_table.pt"))
+
+#     # 解析序列长度信息
+#     # q_seq_lens: [batch_size] — 每个 batch 的 query token 数
+#     # kv_seq_lens: [batch_size] — 每个 batch 的 kv token 数
+#     q_seq_lens = q_seq_len_t.cpu().tolist()
+#     if isinstance(q_seq_lens, int):
+#         q_seq_lens = [q_seq_lens]
+#     kv_seq_lens = kv_seq_len_t.cpu().tolist()
+#     if isinstance(kv_seq_lens, int):
+#         kv_seq_lens = [kv_seq_lens]
+
+#     batch_size = len(q_seq_lens)
+#     total_q = sum(q_seq_lens)
+#     assert q.shape[0] == total_q, (
+#         f"q.shape[0] ({q.shape[0]}) != total_q ({total_q})")
+
+#     print(f"  batch_size={batch_size}  total_q={total_q}")
+#     print(f"  q_seq_lens={q_seq_lens}  kv_seq_lens={kv_seq_lens}")
+#     print(f"  q={list(q.shape)}  k_cache={list(key_cache.shape)}  v_cache={list(value_cache.shape)}")
+#     print(f"  block_table={list(block_table.shape)}")
+
+#     ok, _ = _run_one_fa_test(
+#         q, key_cache, value_cache,
+#         q_seq_lens, kv_seq_lens, block_table,
+#         label="fa_pt_real_data",
+#     )
+
+#     return ok
+
+
+def test_from_real_data():
+    """使用 fa_pt/ 目录下的真实数据进行精度对拍"""
+    print("-" * 60)
+    print("fa_pt 真实数据测试")
+
+    # 1. 检查必需文件
+    required_files = [
+        "kv_cache.pt", "query.pt", "q_seq_lens.pt",
+        "kv_seq_lens.pt", "tecoops_block_table.pt",
+        "max_query_len.pt", "max_seq_len.pt",
+    ]
+    for f in required_files:
+        if not os.path.exists(os.path.join(DATA_DIR, f)):
+            print(f"  跳过: 缺少 {f}")
+            return True
+
+    # 2. 加载 kv_cache -> key_cache, value_cache
+    kv_cache = torch.load(os.path.join(DATA_DIR, "kv_cache.pt"))
+    if isinstance(kv_cache, (tuple, list)):
+        key_cache, value_cache = kv_cache[0], kv_cache[1]
+    else:
+        key_cache, value_cache = kv_cache.unbind(0)
+
+    # 3. 加载其他数据
+    q = torch.load(os.path.join(DATA_DIR, "query.pt"))
+    q_seq_len_t = torch.load(os.path.join(DATA_DIR, "q_seq_lens.pt"))
+    kv_seq_len_t = torch.load(os.path.join(DATA_DIR, "kv_seq_lens.pt"))
+    block_table = torch.load(os.path.join(DATA_DIR, "tecoops_block_table.pt"))
+    max_query_len = torch.load(os.path.join(DATA_DIR, "max_query_len.pt"))
+    max_seq_len = torch.load(os.path.join(DATA_DIR, "max_seq_len.pt"))
+
+    # 4. 解析序列长度
+    q_seq_lens = q_seq_len_t.cpu().tolist()
+    if isinstance(q_seq_lens, int):
+        q_seq_lens = [q_seq_lens]
+    kv_seq_lens = kv_seq_len_t.cpu().tolist()
+    if isinstance(kv_seq_lens, int):
+        kv_seq_lens = [kv_seq_lens]
+
+    batch_size = len(q_seq_lens)
+    total_q = sum(q_seq_lens)
+    assert q.shape[0] == total_q, (
+        f"q.shape[0] ({q.shape[0]}) != total_q ({total_q})")
+
+    # 5. 打印信息
+    print(f"  batch_size={batch_size}  total_q={total_q}")
+    print(f"  q_seq_lens={q_seq_lens}  kv_seq_lens={kv_seq_lens}")
+    print(f"  q={list(q.shape)}  k_cache={list(key_cache.shape)}  v_cache={list(value_cache.shape)}")
+    print(f"  block_table={list(block_table.shape)}")
+    print(f"  max_query_len={max_query_len}  max_seq_len={max_seq_len}")
+
+    # 6. 运行精度对拍
+    ok, _ = _run_one_fa_test(
+        q, key_cache, value_cache,
+        q_seq_lens, kv_seq_lens, block_table,
+        label="fa_pt_real_data",
+    )
+
+    return ok
+
+
+
 # ========================================================================
 # 主入口
 # ========================================================================
@@ -387,6 +512,7 @@ if __name__ == "__main__":
         ("test_chunked_prefill",  test_chunked_prefill),
         ("test_gqa",  test_gqa),
         ("test_multi_batch",  test_multi_batch),
+        ("from_real_data",  test_from_real_data),
     ]
 
     all_passed = True

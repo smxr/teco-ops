@@ -79,7 +79,7 @@ list(APPEND SRC_ALL
     ${SRC_UAL_OPS}
     ${SRC_UAL_KERNEL})
 
-set(complie_options -O3 -msimd -mslave -fPIC -flto -x sdaa -std=c++17 --sdaa-device-lib=${OPS_DIR}/../thirdparty/teco-hal/lib/teco_hal.bc)
+set(complie_options -O0 -g -msimd -mslave -fPIC -flto -x sdaa -std=c++17 --sdaa-device-lib=${OPS_DIR}/../thirdparty/teco-hal/lib/teco_hal.bc)
 add_definitions(-DUSE_TECO)
 
 add_library(ops_objs OBJECT ${SRC_ALL})

@@ -25,7 +25,7 @@ if [[ " ${BUILD_TARGETS[*]} " =~ " teco " ]]; then
     cd build
     rm -rf ./teco && mkdir teco
     pushd ./teco
-        cmake ../../teco/
+        cmake ../../teco/ -DDEBUG_MODE=ON
         make -j
     popd
 fi
